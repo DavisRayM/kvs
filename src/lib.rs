@@ -142,7 +142,9 @@ impl KvStore {
                 if let Ok(LogEntry::Set { value, .. }) = LogEntry::deserialize(&mut de) {
                     Ok(Some(value))
                 } else {
-                    Err(StoreError::NotFound)
+                    // NOTE: This isn't expected; if this occurs there is something
+                    //       horribly wrong with the position or in-memory index.
+                    panic!("unexpected log entry at byte offset {}", pos);
                 }
             }
             None => Ok(None),
@@ -151,18 +153,16 @@ impl KvStore {
 
     /// Remove the value of a key from the store, If it exists.
     pub fn remove(&mut self, key: String) -> Result<()> {
-        match self.get(key.clone())? {
-            Some(_) => {
+        self.get(key.clone())?
+            .ok_or(StoreError::NotFound)
+            .and_then(|_| {
                 let entry = LogEntry::Rm { key: key.clone() };
-
                 self.writer.seek(SeekFrom::End(0))?;
                 serde_json::to_writer(&mut self.writer, &entry)?;
                 self.writer.flush()?;
                 self.index.remove(&key);
                 Ok(())
-            }
-            None => Err(StoreError::NotFound),
-        }
+            })
     }
 }
 
