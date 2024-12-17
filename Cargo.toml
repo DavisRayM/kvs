@@ -1,0 +1,9 @@
+[package]
+name = "kvs"
+version = "0.1.0"
+edition = "2021"
+authors = ["Davis Raymond Muro <davis.ray.muro@gmail.com>"]
+description = "A networked key-value store"
+license = "MIT"
+
+[dependencies]
