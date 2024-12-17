@@ -7,28 +7,33 @@
 //!
 //! The key-value database implementation utilizes a log-structured store.
 
+use std::collections::HashMap;
+
 /// Represents a key-value store.
-pub struct KvStore {}
+#[derive(Default)]
+pub struct KvStore {
+    store: HashMap<String, String>,
+}
 
 impl KvStore {
     /// Creates a new Key-Value store.
     pub fn new() -> Self {
-        Self {}
+        Self::default()
     }
 
-    /// Set value for a key string.
+    /// Set value for a key. Overrides stored value if any.
     pub fn set(&mut self, key: String, value: String) {
-        unimplemented!()
+        self.store.insert(key, value);
     }
 
-    /// Get the value of a `String` key.
+    /// Get the value of a key.
     pub fn get(&self, key: String) -> Option<String> {
-        unimplemented!()
+        self.store.get(&key).cloned()
     }
 
-    /// Remove the value of a `String` key from the store. If it exists.
+    /// Remove the value of a key from the store, If it exists.
     pub fn remove(&mut self, key: String) {
-        unimplemented!()
+        self.store.remove(&key);
     }
 }
 
