@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
-    io::{BufReader, BufWriter, Seek, SeekFrom, Write},
+    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::PathBuf,
 };
 
@@ -75,7 +75,8 @@ pub(crate) enum LogEntry {
 
 /// Represents a key-value store.
 pub struct KvStore {
-    index: HashMap<String, String>,
+    /// Stores log pointer to key entry
+    index: HashMap<String, u64>,
     reader: BufReader<File>,
     writer: BufWriter<File>,
 }
@@ -95,11 +96,23 @@ impl KvStore {
             .write(true)
             .open(path)?;
 
-        let reader = BufReader::new(file.try_clone()?);
+        let mut reader = BufReader::new(file.try_clone()?);
         let writer = BufWriter::new(file);
+        let mut index = HashMap::new();
+
+        let mut pos = reader.seek(SeekFrom::Start(0))?;
+        let mut de = serde_json::Deserializer::from_reader(&mut reader).into_iter();
+        while let Some(res) = de.next() {
+            let entry: LogEntry = res?;
+            match entry {
+                LogEntry::Set { key, .. } => index.insert(key, pos),
+                LogEntry::Rm { ref key } => index.remove(key),
+            };
+            pos += de.byte_offset() as u64;
+        }
 
         Ok(Self {
-            index: HashMap::new(),
+            index,
             reader,
             writer,
         })
@@ -112,25 +125,28 @@ impl KvStore {
             value,
         };
 
-        let _ = self.writer.seek(SeekFrom::End(0))?;
+        let pos = self.writer.seek(SeekFrom::End(0))?;
         serde_json::to_writer(&mut self.writer, &entry)?;
         self.writer.flush()?;
+        self.index.insert(key, pos);
         Ok(())
     }
 
     /// Get the value of a key.
     pub fn get(&mut self, key: String) -> Result<Option<String>> {
-        self.reader.seek(SeekFrom::Start(0))?;
-
-        let mut de = serde_json::Deserializer::from_reader(&mut self.reader);
-        while let Ok(entry) = LogEntry::deserialize(&mut de) {
-            match entry {
-                LogEntry::Set { key, value } => self.index.insert(key, value),
-                LogEntry::Rm { ref key } => self.index.remove(key),
-            };
+        match self.index.get(&key) {
+            Some(pos) => {
+                self.reader.seek(SeekFrom::Start(*pos))?;
+                // There has to be a better way
+                let mut de = serde_json::Deserializer::from_reader(&mut self.reader);
+                if let Ok(LogEntry::Set { value, .. }) = LogEntry::deserialize(&mut de) {
+                    Ok(Some(value))
+                } else {
+                    Err(StoreError::NotFound)
+                }
+            }
+            None => Ok(None),
         }
-
-        Ok(self.index.get(&key).cloned())
     }
 
     /// Remove the value of a key from the store, If it exists.
@@ -142,6 +158,7 @@ impl KvStore {
                 self.writer.seek(SeekFrom::End(0))?;
                 serde_json::to_writer(&mut self.writer, &entry)?;
                 self.writer.flush()?;
+                self.index.remove(&key);
                 Ok(())
             }
             None => Err(StoreError::NotFound),
