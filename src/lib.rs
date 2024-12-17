@@ -14,18 +14,31 @@ use std::{collections::HashMap, path::PathBuf};
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// The error type for KvStore operations.
-#[derive(Debug, Clone)]
-pub enum StoreError {}
+#[derive(Debug)]
+pub enum StoreError {
+    /// An IO Error occured while accessing the underlying file.
+    Io(std::io::Error),
+}
 
 impl std::fmt::Display for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        match self {
+            StoreError::Io(err) => write!(f, "IO Error: {}", err),
+        }
     }
 }
 
 impl std::error::Error for StoreError {
     fn cause(&self) -> Option<&dyn std::error::Error> {
-        None
+        match self {
+            StoreError::Io(err) => Some(err),
+        }
+    }
+}
+
+impl From<std::io::Error> for StoreError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err)
     }
 }
 
