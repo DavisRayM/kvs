@@ -7,6 +7,7 @@
 //!
 //! The key-value database implementation utilizes a log-structured store.
 
+use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf};
 
 /// Custom `Result` type that represents a success or error of KvStore
@@ -42,10 +43,17 @@ impl From<std::io::Error> for StoreError {
     }
 }
 
+/// A list specifying supported Write-Ahead Log(WAL) entries.
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) enum LogEntry {
+    Set { key: String, value: String },
+    Rm { key: String },
+}
+
 /// Represents a key-value store.
 #[derive(Default)]
 pub struct KvStore {
-    store: HashMap<String, String>,
+    index: HashMap<String, String>,
 }
 
 impl KvStore {
@@ -59,18 +67,18 @@ impl KvStore {
 
     /// Set value for a key. Overrides stored value if any.
     pub fn set(&mut self, key: String, value: String) -> Result<()> {
-        self.store.insert(key, value);
+        self.index.insert(key, value);
         Ok(())
     }
 
     /// Get the value of a key.
     pub fn get(&self, key: String) -> Result<Option<String>> {
-        Ok(self.store.get(&key).cloned())
+        Ok(self.index.get(&key).cloned())
     }
 
     /// Remove the value of a key from the store, If it exists.
     pub fn remove(&mut self, key: String) -> Result<()> {
-        self.store.remove(&key);
+        self.index.remove(&key);
         Ok(())
     }
 }
