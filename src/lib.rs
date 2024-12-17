@@ -8,7 +8,15 @@
 //! The key-value database implementation utilizes a log-structured store.
 
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    fs::{File, OpenOptions},
+    io::{BufReader, BufWriter, Seek, SeekFrom},
+    path::PathBuf,
+};
+
+/// File extension for logs
+pub static LOG_EXTENSION: &str = ".kv";
 
 /// Custom `Result` type that represents a success or error of KvStore
 /// functionality
@@ -51,34 +59,69 @@ pub(crate) enum LogEntry {
 }
 
 /// Represents a key-value store.
-#[derive(Default)]
 pub struct KvStore {
     index: HashMap<String, String>,
+    reader: BufReader<File>,
+    writer: BufWriter<File>,
 }
 
 impl KvStore {
-    /// Opens a key-value store at the given path.
+    /// Opens a key-value store at the given directory path.
+    ///
     ///
     /// If Key-Value store exists at the path, the pre-existing stores index is
     /// loaded into memory and subsequent changes are stored.
-    pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
-        todo!()
+    pub fn open(dir_path: impl Into<PathBuf>) -> Result<Self> {
+        let dir_path: PathBuf = dir_path.into();
+        let path = dir_path.join(format!("1.{}", LOG_EXTENSION));
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(path)?;
+
+        let reader = BufReader::new(file.try_clone()?);
+        let writer = BufWriter::new(file);
+
+        Ok(Self {
+            index: HashMap::new(),
+            reader,
+            writer,
+        })
     }
 
     /// Set value for a key. Overrides stored value if any.
     pub fn set(&mut self, key: String, value: String) -> Result<()> {
-        self.index.insert(key, value);
+        let entry = LogEntry::Set {
+            key: key.clone(),
+            value,
+        };
+
+        let _ = self.writer.seek(SeekFrom::End(0))?;
+        serde_json::to_writer(&mut self.writer, &entry)?;
         Ok(())
     }
 
     /// Get the value of a key.
-    pub fn get(&self, key: String) -> Result<Option<String>> {
+    pub fn get(&mut self, key: String) -> Result<Option<String>> {
+        self.reader.seek(SeekFrom::Start(0))?;
+
+        while let Ok(entry) = serde_json::from_reader::<_, LogEntry>(&mut self.reader) {
+            match entry {
+                LogEntry::Set { key, value } => self.index.insert(key, value),
+                LogEntry::Rm { ref key } => self.index.remove(key),
+            };
+        }
+
         Ok(self.index.get(&key).cloned())
     }
 
     /// Remove the value of a key from the store, If it exists.
     pub fn remove(&mut self, key: String) -> Result<()> {
-        self.index.remove(&key);
+        let entry = LogEntry::Rm { key: key.clone() };
+
+        self.writer.seek(SeekFrom::End(0))?;
+        serde_json::to_writer(&mut self.writer, &entry)?;
         Ok(())
     }
 }
