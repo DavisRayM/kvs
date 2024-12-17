@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
-    io::{BufReader, BufWriter, Seek, SeekFrom},
+    io::{BufReader, BufWriter, Seek, SeekFrom, Write},
     path::PathBuf,
 };
 
@@ -20,19 +20,26 @@ pub static LOG_EXTENSION: &str = ".kv";
 
 /// Custom `Result` type that represents a success or error of KvStore
 /// functionality
-pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+pub type Result<T> = std::result::Result<T, StoreError>;
 
 /// The error type for KvStore operations.
 #[derive(Debug)]
 pub enum StoreError {
     /// An IO Error occured while accessing the underlying file.
     Io(std::io::Error),
+    /// A serde error occured while serializing or deserializing a log entry.
+    Serde(serde_json::error::Error),
+    /// An operation failed due to a missing key. Often occurs when
+    /// trying to remove a key that does not exist
+    NotFound,
 }
 
 impl std::fmt::Display for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StoreError::Io(err) => write!(f, "IO Error: {}", err),
+            StoreError::NotFound => write!(f, "Key not found"),
+            StoreError::Serde(err) => write!(f, "Serde Error: {}", err),
         }
     }
 }
@@ -41,6 +48,8 @@ impl std::error::Error for StoreError {
     fn cause(&self) -> Option<&dyn std::error::Error> {
         match self {
             StoreError::Io(err) => Some(err),
+            StoreError::NotFound => None,
+            StoreError::Serde(err) => Some(err),
         }
     }
 }
@@ -48,6 +57,12 @@ impl std::error::Error for StoreError {
 impl From<std::io::Error> for StoreError {
     fn from(err: std::io::Error) -> Self {
         Self::Io(err)
+    }
+}
+
+impl From<serde_json::error::Error> for StoreError {
+    fn from(err: serde_json::error::Error) -> Self {
+        Self::Serde(err)
     }
 }
 
@@ -99,6 +114,7 @@ impl KvStore {
 
         let _ = self.writer.seek(SeekFrom::End(0))?;
         serde_json::to_writer(&mut self.writer, &entry)?;
+        self.writer.flush()?;
         Ok(())
     }
 
@@ -106,7 +122,8 @@ impl KvStore {
     pub fn get(&mut self, key: String) -> Result<Option<String>> {
         self.reader.seek(SeekFrom::Start(0))?;
 
-        while let Ok(entry) = serde_json::from_reader::<_, LogEntry>(&mut self.reader) {
+        let mut de = serde_json::Deserializer::from_reader(&mut self.reader);
+        while let Ok(entry) = LogEntry::deserialize(&mut de) {
             match entry {
                 LogEntry::Set { key, value } => self.index.insert(key, value),
                 LogEntry::Rm { ref key } => self.index.remove(key),
@@ -118,11 +135,17 @@ impl KvStore {
 
     /// Remove the value of a key from the store, If it exists.
     pub fn remove(&mut self, key: String) -> Result<()> {
-        let entry = LogEntry::Rm { key: key.clone() };
+        match self.get(key.clone())? {
+            Some(_) => {
+                let entry = LogEntry::Rm { key: key.clone() };
 
-        self.writer.seek(SeekFrom::End(0))?;
-        serde_json::to_writer(&mut self.writer, &entry)?;
-        Ok(())
+                self.writer.seek(SeekFrom::End(0))?;
+                serde_json::to_writer(&mut self.writer, &entry)?;
+                self.writer.flush()?;
+                Ok(())
+            }
+            None => Err(StoreError::NotFound),
+        }
     }
 }
 

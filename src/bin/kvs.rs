@@ -1,7 +1,7 @@
 use std::process::exit;
 
 use clap::{Parser, Subcommand};
-use kvs::Result;
+use kvs::{KvStore, Result};
 
 #[derive(Parser)]
 #[command(name = env!("CARGO_BIN_NAME"), version = env!("CARGO_PKG_VERSION"), about = env!("CARGO_PKG_DESCRIPTION"), long_about = None)]
@@ -22,19 +22,22 @@ enum Command {
 
 fn main() -> Result<()> {
     let args = Cli::parse();
+    let path = std::env::current_dir()?;
+    let mut store = KvStore::open(path)?;
 
     match &args.command {
-        Command::Get { .. } => {
-            eprintln!("unimplemented");
-            exit(1)
+        Command::Get { key } => match store.get(key.to_owned())? {
+            Some(value) => println!("{}", value),
+            None => println!("Key not found"),
+        },
+        Command::Rm { key } => {
+            if let Err(err) = store.remove(key.to_owned()) {
+                println!("{}", err);
+                exit(2);
+            }
         }
-        Command::Rm { .. } => {
-            eprintln!("unimplemented");
-            exit(1)
-        }
-        Command::Set { .. } => {
-            eprintln!("unimplemented");
-            exit(1)
-        }
+        Command::Set { key, value } => store.set(key.to_owned(), value.to_owned())?,
     }
+
+    Ok(())
 }
