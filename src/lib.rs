@@ -73,7 +73,7 @@ impl KvStore {
     /// loaded into memory and subsequent changes are stored.
     pub fn open(dir_path: impl Into<PathBuf>) -> Result<Self> {
         let dir_path: PathBuf = dir_path.into();
-        let path = dir_path.join(format!("1.{}", LOG_EXTENSION));
+        let path = dir_path.join(format!("1{}", LOG_EXTENSION));
         let file = OpenOptions::new()
             .create(true)
             .read(true)
