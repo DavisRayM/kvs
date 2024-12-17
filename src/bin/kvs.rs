@@ -1,6 +1,7 @@
 use std::process::exit;
 
 use clap::{Parser, Subcommand};
+use kvs::Result;
 
 #[derive(Parser)]
 #[command(name = env!("CARGO_BIN_NAME"), version = env!("CARGO_PKG_VERSION"), about = env!("CARGO_PKG_DESCRIPTION"), long_about = None)]
@@ -19,7 +20,7 @@ enum Command {
     Set { key: String, value: String },
 }
 
-fn main() {
+fn main() -> Result<()> {
     let args = Cli::parse();
 
     match &args.command {

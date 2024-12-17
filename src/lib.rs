@@ -13,6 +13,22 @@ use std::{collections::HashMap, path::PathBuf};
 /// functionality
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+/// The error type for KvStore operations.
+#[derive(Debug, Clone)]
+pub enum StoreError {}
+
+impl std::fmt::Display for StoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        todo!()
+    }
+}
+
+impl std::error::Error for StoreError {
+    fn cause(&self) -> Option<&dyn std::error::Error> {
+        None
+    }
+}
+
 /// Represents a key-value store.
 #[derive(Default)]
 pub struct KvStore {
