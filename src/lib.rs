@@ -18,7 +18,11 @@ use std::{
 
 /// File extension for logs
 pub const LOG_EXTENSION: &str = "kv";
-const COMPACTION_THRESHOLD: usize = 10;
+
+/// Byte threshold of unclaimed space that should trigger compaction
+///
+/// Default: 1MB
+const COMPACTION_THRESHOLD: usize = 1_000_000;
 
 /// Custom `Result` type that represents a success or error of KvStore
 /// functionality
@@ -103,7 +107,7 @@ impl From<(u64, Range<u64>)> for EntryPosition {
 /// Loads the Key-Value store log fragment at the given path.
 ///
 /// The process entails indexing the entries at the given path. It returns the
-/// fragment number, size of defragmented space and a `BufReader` for the fragment.
+/// fragment number, size of unreclaimed space and a `BufReader` for the fragment.
 fn load_fragment(
     path: PathBuf,
     index: &mut HashMap<String, EntryPosition>,
@@ -117,7 +121,7 @@ fn load_fragment(
         .ok_or(StoreError::Fragment("invalid fragment file name".into()))?
         .parse::<u64>()
         .map_err(|_| StoreError::Fragment("invalid fragment number".into()))?;
-    let mut fragmented_space = 0;
+    let mut unreclaimed_space = 0;
 
     let log = OpenOptions::new().read(true).open(path)?;
     let mut reader = BufReader::new(log);
@@ -133,28 +137,33 @@ fn load_fragment(
             }
             LogEntry::Rm { ref key } => index.remove(key),
         } {
-            fragmented_space += prev_ep.size;
+            unreclaimed_space += prev_ep.size;
         }
         pos = new_pos;
     }
 
-    Ok((fragment, fragmented_space, reader))
+    Ok((fragment, unreclaimed_space, reader))
 }
 
-/// Creates a new fragment file
+/// Creates a new fragment file. If file already exists it is truncated.
 fn new_fragment(fragment: u64, dir: &Path) -> Result<File> {
-    let path = dir.join(format!("{}.{}", fragment, LOG_EXTENSION));
+    let path = dir.join(fragment_filename(fragment));
     Ok(OpenOptions::new()
-        .create_new(true)
+        .create(true)
+        .truncate(true)
         .read(true)
         .write(true)
         .open(path)?)
 }
 
+fn fragment_filename(fragment: u64) -> String {
+    format!("{}.{}", fragment, LOG_EXTENSION)
+}
+
 /// Represents a key-value store.
 pub struct KvStore {
     dir: PathBuf,
-    compactable_space: usize,
+    unreclaimed_space: usize,
     fragment: u64,
     fragment_readers: HashMap<u64, BufReader<File>>,
     index: HashMap<String, EntryPosition>,
@@ -171,7 +180,7 @@ impl KvStore {
         let dir: PathBuf = dir.into();
         let mut fragment = 0;
         let mut index = HashMap::new();
-        let mut compactable_space = 0;
+        let mut unreclaimed_space = 0;
 
         // Load all pre-existing fragments
         // NOTE: I'm both proud and scared of what I've done here...
@@ -190,7 +199,7 @@ impl KvStore {
                     if frag > fragment {
                         fragment = frag;
                     }
-                    compactable_space += c_space;
+                    unreclaimed_space += c_space;
                     (frag, reader)
                 })
             })
@@ -210,7 +219,7 @@ impl KvStore {
 
         let mut store = Self {
             dir,
-            compactable_space,
+            unreclaimed_space,
             fragment,
             fragment_readers,
             index,
@@ -225,6 +234,50 @@ impl KvStore {
     /// Compaction clears outdated entries from the stores log fragments, generating
     /// a new log fragment with up to date values.
     fn compact(&mut self) -> Result<()> {
+        if self.unreclaimed_space > COMPACTION_THRESHOLD {
+            let new_gen = self.fragment + 1;
+            // Store new fragment in temp till the compaction is succesful.
+            // Avoid corrupting the stores directory due to failed compaction.
+            let fragment = new_fragment(new_gen, &std::env::temp_dir())?;
+            let mut writer = BufWriter::new(fragment.try_clone()?);
+
+            let mut index = self.index.clone();
+            for (key, ep) in index.iter_mut() {
+                let reader =
+                    self.fragment_readers
+                        .get_mut(&ep.fragment)
+                        .ok_or(StoreError::Fragment(format!(
+                            "[Gen({})] missing fragment reader {} for entry {}",
+                            new_gen, ep.fragment, key
+                        )))?;
+                reader.seek(SeekFrom::Start(ep.pos))?;
+
+                let mut buf = vec![0; ep.size];
+                reader.read_exact(&mut buf)?;
+
+                ep.pos = writer.seek(SeekFrom::End(0))?;
+                ep.fragment = new_gen;
+                writer.write_all(&buf)?;
+            }
+
+            writer.flush()?;
+            std::fs::rename(
+                std::env::temp_dir().join(fragment_filename(new_gen)),
+                self.dir.join(fragment_filename(new_gen)),
+            )?;
+
+            // Compaction is done; old versions are safe to delete now.
+            let reader = BufReader::new(fragment);
+            self.writer = writer;
+            self.fragment = new_gen;
+            self.index = index;
+            self.unreclaimed_space = 0;
+            for (old_fragment, reader) in self.fragment_readers.drain() {
+                drop(reader);
+                std::fs::remove_file(self.dir.join(fragment_filename(old_fragment)))?;
+            }
+            self.fragment_readers.insert(new_gen, reader);
+        }
         Ok(())
     }
 
@@ -242,7 +295,9 @@ impl KvStore {
         self.writer.write_all(&buf)?;
         self.writer.flush()?;
 
-        self.index.insert(key, (self.fragment, pos..new_pos).into());
+        if let Some(prev) = self.index.insert(key, (self.fragment, pos..new_pos).into()) {
+            self.unreclaimed_space += prev.size;
+        }
         self.compact()
     }
 
@@ -272,16 +327,20 @@ impl KvStore {
 
     /// Remove the value of a key from the store, If it exists.
     pub fn remove(&mut self, key: String) -> Result<()> {
-        self.get(key.clone())?
-            .ok_or(StoreError::NotFound)
-            .and_then(|_| {
+        match self.index.remove(&key) {
+            None => Err(StoreError::NotFound),
+            Some(ep) => {
                 let entry = LogEntry::Rm { key: key.clone() };
+                let buf = serde_json::to_vec(&entry)?;
+
                 self.writer.seek(SeekFrom::End(0))?;
-                serde_json::to_writer(&mut self.writer, &entry)?;
+                self.writer.write_all(&buf)?;
                 self.writer.flush()?;
-                self.index.remove(&key);
-                Ok(())
-            })
+                self.unreclaimed_space += ep.size + buf.len();
+
+                self.compact()
+            }
+        }
     }
 }
 
