@@ -32,9 +32,9 @@ pub trait KvEngine {
 /// The error type for StorageEngine operations.
 #[derive(Debug)]
 pub enum StoreError {
-    /// An IO Error occured while accessing the underlying file.
+    /// An IO Error occurred while accessing the underlying file.
     Io(std::io::Error),
-    /// A serde error occured while serializing or deserializing a log entry.
+    /// A serde error occurred while serializing or deserializing a log entry.
     Serde(serde_json::error::Error),
     /// An operation failed due to a missing key. Often occurs when
     /// trying to remove a key that does not exist
@@ -43,6 +43,8 @@ pub enum StoreError {
     Fragment(String),
     /// An error occurred while setting default tracing subscriber
     SubscriberGlobalDefault(SetGlobalDefaultError),
+    /// An error occurred during address parsing
+    AddrParse(std::net::AddrParseError),
 }
 
 impl std::fmt::Display for StoreError {
@@ -55,6 +57,7 @@ impl std::fmt::Display for StoreError {
             StoreError::SubscriberGlobalDefault(err) => {
                 write!(f, "Tracing subscriber error: {}", err)
             }
+            StoreError::AddrParse(err) => write!(f, "Address parsing error: {}", err),
         }
     }
 }
@@ -67,6 +70,7 @@ impl std::error::Error for StoreError {
             StoreError::Serde(err) => Some(err),
             StoreError::Fragment(_) => None,
             StoreError::SubscriberGlobalDefault(err) => Some(err),
+            StoreError::AddrParse(err) => Some(err),
         }
     }
 }
@@ -84,7 +88,13 @@ impl From<serde_json::error::Error> for StoreError {
 }
 
 impl From<SetGlobalDefaultError> for StoreError {
-    fn from(value: SetGlobalDefaultError) -> Self {
-        Self::SubscriberGlobalDefault(value)
+    fn from(err: SetGlobalDefaultError) -> Self {
+        Self::SubscriberGlobalDefault(err)
+    }
+}
+
+impl From<std::net::AddrParseError> for StoreError {
+    fn from(err: std::net::AddrParseError) -> Self {
+        Self::AddrParse(err)
     }
 }

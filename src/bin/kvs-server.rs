@@ -1,7 +1,11 @@
-use std::io;
+use std::{
+    io,
+    net::{SocketAddr, TcpListener},
+    str::FromStr,
+};
 
 use clap::Parser;
-use kvs::{EngineType, Result};
+use kvs::{EngineType, KvServer, Result};
 use tracing::{event, Level};
 
 #[derive(Parser)]
@@ -26,5 +30,15 @@ fn main() -> Result<()> {
         address = args.addr,
         engine = args.engine.to_string(),
     );
+
+    let address = SocketAddr::from_str(&args.addr)?;
+    let listener = TcpListener::bind(address)?;
+    let mut server = KvServer::new();
+
+    // NOTE: Can't push this to CI; Unless you like long-running tests
+    // for stream in listener.incoming() {
+    //     server.handle_connection(stream?)?;
+    // }
+
     Ok(())
 }

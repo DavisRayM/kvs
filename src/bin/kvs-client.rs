@@ -1,3 +1,5 @@
+use std::{io::Write, net::TcpStream};
+
 use clap::{Parser, Subcommand};
 use kvs::Result;
 
@@ -22,5 +24,9 @@ enum Command {
 
 fn main() -> Result<()> {
     let args = Cli::parse();
+
+    let mut stream = TcpStream::connect(args.addr)?;
+
+    stream.write_all(&[1])?;
     Ok(())
 }
