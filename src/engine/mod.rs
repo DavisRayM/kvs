@@ -5,9 +5,29 @@
 use tracing::subscriber::SetGlobalDefaultError;
 pub mod kvs;
 
+pub use kvs::KvStore;
+
 /// Custom `Result` type that represents a success or error of KvStore
 /// functionality
 pub type Result<T> = std::result::Result<T, StoreError>;
+
+/// Key-Value storage engine trait.
+///
+/// Defines the interface used to interact with storage engines
+pub trait KvEngine {
+    /// Set the value of a key.
+    fn set(&mut self, key: String, value: String) -> Result<()>;
+
+    /// Get the value of a key.
+    fn get(&mut self, key: String) -> Result<Option<String>>;
+
+    /// Remove a given key.
+    ///
+    /// # Errors
+    ///
+    /// An error is returned if the key does not exist.
+    fn remove(&mut self, key: String) -> Result<()>;
+}
 
 /// The error type for StorageEngine operations.
 #[derive(Debug)]

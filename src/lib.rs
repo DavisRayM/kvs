@@ -8,6 +8,8 @@
 //! The key-value database implementation utilizes a log-structured store.
 pub mod engine;
 
+use std::fmt::Display;
+
 pub use engine::Result;
 
 use serde::Serialize;
@@ -23,11 +25,11 @@ pub enum EngineType {
     Sled,
 }
 
-impl ToString for EngineType {
-    fn to_string(&self) -> String {
+impl Display for EngineType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EngineType::Kvs => "kvs".into(),
-            EngineType::Sled => "sled".into(),
+            EngineType::Kvs => write!(f, "kvs"),
+            EngineType::Sled => write!(f, "sled"),
         }
     }
 }

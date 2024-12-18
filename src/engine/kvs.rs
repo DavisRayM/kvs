@@ -1,6 +1,6 @@
 //! Built-in storage Key-Value Database Engine
 //!
-use super::{Result, StoreError};
+use super::{KvEngine, Result, StoreError};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -166,9 +166,10 @@ impl KvStore {
         }
         Ok(())
     }
+}
 
-    /// Set value for a key. Overrides stored value if any.
-    pub fn set(&mut self, key: String, value: String) -> Result<()> {
+impl KvEngine for KvStore {
+    fn set(&mut self, key: String, value: String) -> Result<()> {
         let entry = LogEntry::Set {
             key: key.clone(),
             value,
@@ -187,8 +188,7 @@ impl KvStore {
         self.compact()
     }
 
-    /// Get the value of a key.
-    pub fn get(&mut self, key: String) -> Result<Option<String>> {
+    fn get(&mut self, key: String) -> Result<Option<String>> {
         match self.index.get(&key) {
             Some(ep) => {
                 let reader = self
@@ -211,8 +211,7 @@ impl KvStore {
         }
     }
 
-    /// Remove the value of a key from the store, If it exists.
-    pub fn remove(&mut self, key: String) -> Result<()> {
+    fn remove(&mut self, key: String) -> Result<()> {
         match self.index.remove(&key) {
             None => Err(StoreError::NotFound),
             Some(ep) => {
