@@ -10,7 +10,11 @@ pub mod engine;
 
 use std::{fmt::Display, net::TcpStream};
 
+// TODO: This needs to be split; Engine errors are different from the network
+//       bits.
 pub use engine::Result;
+
+// TODO: Network Protocol, KvClient, KvServer
 
 use serde::Serialize;
 use tracing::{info, instrument};

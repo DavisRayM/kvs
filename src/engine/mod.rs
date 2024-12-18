@@ -41,6 +41,8 @@ pub enum StoreError {
     NotFound,
     /// An error occurred while accessing a log fragment
     Fragment(String),
+
+    // TODO: Everything from this point needs to move; It's not related to the storage engines
     /// An error occurred while setting default tracing subscriber
     SubscriberGlobalDefault(SetGlobalDefaultError),
     /// An error occurred during address parsing
