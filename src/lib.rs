@@ -12,11 +12,13 @@ use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    ops::Range,
     path::PathBuf,
 };
 
 /// File extension for logs
-pub static LOG_EXTENSION: &str = ".kv";
+pub const LOG_EXTENSION: &str = ".kv";
+const COMPACTION_THRESHOLD: usize = 10;
 
 /// Custom `Result` type that represents a success or error of KvStore
 /// functionality
@@ -73,10 +75,31 @@ pub(crate) enum LogEntry {
     Rm { key: String },
 }
 
+/// Represents the location of an entry in the log fragments.
+#[derive(Debug, Clone)]
+pub struct EntryPosition {
+    /// Fragment the entry is currently located in.
+    pub fragment: u64,
+    /// Position of the entry in the fragment
+    pub pos: u64,
+    /// Size of the entry
+    pub size: usize,
+}
+
+impl From<(u64, Range<u64>)> for EntryPosition {
+    fn from(value: (u64, Range<u64>)) -> Self {
+        Self {
+            fragment: value.0,
+            pos: value.1.start,
+            size: (value.1.end - value.1.start) as usize,
+        }
+    }
+}
+
 /// Represents a key-value store.
 pub struct KvStore {
-    /// Stores log pointer to key entry
-    index: HashMap<String, u64>,
+    fragment: u64,
+    index: HashMap<String, EntryPosition>,
     reader: BufReader<File>,
     writer: BufWriter<File>,
 }
@@ -89,7 +112,8 @@ impl KvStore {
     /// loaded into memory and subsequent changes are stored.
     pub fn open(dir_path: impl Into<PathBuf>) -> Result<Self> {
         let dir_path: PathBuf = dir_path.into();
-        let path = dir_path.join(format!("1{}", LOG_EXTENSION));
+        let fragment = 0;
+        let path = dir_path.join(format!("{}{}", fragment, LOG_EXTENSION));
         let file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -104,14 +128,18 @@ impl KvStore {
         let mut de = serde_json::Deserializer::from_reader(&mut reader).into_iter();
         while let Some(res) = de.next() {
             let entry: LogEntry = res?;
+            let new_pos = de.byte_offset() as u64;
             match entry {
-                LogEntry::Set { key, .. } => index.insert(key, pos),
+                LogEntry::Set { key, .. } => {
+                    index.insert(key.to_owned(), (fragment, pos..new_pos).into())
+                }
                 LogEntry::Rm { ref key } => index.remove(key),
             };
-            pos += de.byte_offset() as u64;
+            pos = new_pos;
         }
 
         Ok(Self {
+            fragment,
             index,
             reader,
             writer,
@@ -124,27 +152,33 @@ impl KvStore {
             key: key.clone(),
             value,
         };
+        let buf = serde_json::to_vec(&entry)?;
+        let size = buf.len() as u64;
 
         let pos = self.writer.seek(SeekFrom::End(0))?;
-        serde_json::to_writer(&mut self.writer, &entry)?;
+        let new_pos = size + pos;
+        self.writer.write_all(&buf)?;
         self.writer.flush()?;
-        self.index.insert(key, pos);
+
+        self.index.insert(key, (self.fragment, pos..new_pos).into());
         Ok(())
     }
 
     /// Get the value of a key.
     pub fn get(&mut self, key: String) -> Result<Option<String>> {
         match self.index.get(&key) {
-            Some(pos) => {
-                self.reader.seek(SeekFrom::Start(*pos))?;
-                // There has to be a better way
-                let mut de = serde_json::Deserializer::from_reader(&mut self.reader);
-                if let Ok(LogEntry::Set { value, .. }) = LogEntry::deserialize(&mut de) {
-                    Ok(Some(value))
-                } else {
+            Some(ep) => {
+                self.reader.seek(SeekFrom::Start(ep.pos))?;
+
+                let mut buf = Vec::new();
+                buf.resize(ep.size, 0);
+                self.reader.read(&mut buf[..])?;
+
+                match serde_json::from_slice(&buf[..]) {
+                    Ok(LogEntry::Set { value, .. }) => Ok(Some(value)),
                     // NOTE: This isn't expected; if this occurs there is something
                     //       horribly wrong with the position or in-memory index.
-                    panic!("unexpected log entry at byte offset {}", pos);
+                    e => panic!("unexpected log entry at byte offset {}; {:?}", ep.pos, e),
                 }
             }
             None => Ok(None),
