@@ -13,11 +13,11 @@ use std::{
     fs::{File, OpenOptions},
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     ops::Range,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 /// File extension for logs
-pub const LOG_EXTENSION: &str = ".kv";
+pub const LOG_EXTENSION: &str = "kv";
 const COMPACTION_THRESHOLD: usize = 10;
 
 /// Custom `Result` type that represents a success or error of KvStore
@@ -34,6 +34,8 @@ pub enum StoreError {
     /// An operation failed due to a missing key. Often occurs when
     /// trying to remove a key that does not exist
     NotFound,
+    /// An error occurred while accessing a log fragment
+    Fragment(String),
 }
 
 impl std::fmt::Display for StoreError {
@@ -42,6 +44,7 @@ impl std::fmt::Display for StoreError {
             StoreError::Io(err) => write!(f, "IO Error: {}", err),
             StoreError::NotFound => write!(f, "Key not found"),
             StoreError::Serde(err) => write!(f, "Serde Error: {}", err),
+            StoreError::Fragment(desc) => write!(f, "Fragment error: {}", desc),
         }
     }
 }
@@ -52,6 +55,7 @@ impl std::error::Error for StoreError {
             StoreError::Io(err) => Some(err),
             StoreError::NotFound => None,
             StoreError::Serde(err) => Some(err),
+            StoreError::Fragment(_) => None,
         }
     }
 }
@@ -96,11 +100,64 @@ impl From<(u64, Range<u64>)> for EntryPosition {
     }
 }
 
+/// Loads the Key-Value store log fragment at the given path.
+///
+/// The process entails indexing the entries at the given path. It returns the
+/// fragment number, size of defragmented space and a `BufReader` for the fragment.
+fn load_fragment(
+    path: PathBuf,
+    index: &mut HashMap<String, EntryPosition>,
+) -> Result<(u64, usize, BufReader<File>)> {
+    let fragment = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or(StoreError::Fragment("invalid fragment file name".into()))?
+        .split('.')
+        .next()
+        .ok_or(StoreError::Fragment("invalid fragment file name".into()))?
+        .parse::<u64>()
+        .map_err(|_| StoreError::Fragment("invalid fragment number".into()))?;
+    let mut fragmented_space = 0;
+
+    let log = OpenOptions::new().read(true).open(path)?;
+    let mut reader = BufReader::new(log);
+    let mut pos = reader.seek(SeekFrom::Start(0))?;
+    let mut de = serde_json::Deserializer::from_reader(&mut reader).into_iter();
+
+    while let Some(res) = de.next() {
+        let entry: LogEntry = res?;
+        let new_pos = de.byte_offset() as u64;
+        if let Some(prev_ep) = match entry {
+            LogEntry::Set { key, .. } => {
+                index.insert(key.to_owned(), (fragment, pos..new_pos).into())
+            }
+            LogEntry::Rm { ref key } => index.remove(key),
+        } {
+            fragmented_space += prev_ep.size;
+        }
+        pos = new_pos;
+    }
+
+    Ok((fragment, fragmented_space, reader))
+}
+
+/// Creates a new fragment file
+fn new_fragment(fragment: u64, dir: &Path) -> Result<File> {
+    let path = dir.join(format!("{}.{}", fragment, LOG_EXTENSION));
+    Ok(OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(path)?)
+}
+
 /// Represents a key-value store.
 pub struct KvStore {
+    dir: PathBuf,
+    compactable_space: usize,
     fragment: u64,
+    fragment_readers: HashMap<u64, BufReader<File>>,
     index: HashMap<String, EntryPosition>,
-    reader: BufReader<File>,
     writer: BufWriter<File>,
 }
 
@@ -110,40 +167,65 @@ impl KvStore {
     ///
     /// If Key-Value store exists at the path, the pre-existing stores index is
     /// loaded into memory and subsequent changes are stored.
-    pub fn open(dir_path: impl Into<PathBuf>) -> Result<Self> {
-        let dir_path: PathBuf = dir_path.into();
-        let fragment = 0;
-        let path = dir_path.join(format!("{}{}", fragment, LOG_EXTENSION));
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(path)?;
-
-        let mut reader = BufReader::new(file.try_clone()?);
-        let writer = BufWriter::new(file);
+    pub fn open(dir: impl Into<PathBuf>) -> Result<Self> {
+        let dir: PathBuf = dir.into();
+        let mut fragment = 0;
         let mut index = HashMap::new();
+        let mut compactable_space = 0;
 
-        let mut pos = reader.seek(SeekFrom::Start(0))?;
-        let mut de = serde_json::Deserializer::from_reader(&mut reader).into_iter();
-        while let Some(res) = de.next() {
-            let entry: LogEntry = res?;
-            let new_pos = de.byte_offset() as u64;
-            match entry {
-                LogEntry::Set { key, .. } => {
-                    index.insert(key.to_owned(), (fragment, pos..new_pos).into())
-                }
-                LogEntry::Rm { ref key } => index.remove(key),
-            };
-            pos = new_pos;
-        }
+        // Load all pre-existing fragments
+        // NOTE: I'm both proud and scared of what I've done here...
+        let mut fragment_readers = dir
+            .read_dir()?
+            .filter(|res| res.is_ok())
+            .map(|res| res.unwrap().path())
+            .filter(|path| {
+                path.extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext == LOG_EXTENSION)
+                    .unwrap_or(false)
+            })
+            .map(|path| {
+                load_fragment(path, &mut index).map(|(frag, c_space, reader)| {
+                    if frag > fragment {
+                        fragment = frag;
+                    }
+                    compactable_space += c_space;
+                    (frag, reader)
+                })
+            })
+            .collect::<Result<HashMap<u64, BufReader<File>>>>()?;
 
-        Ok(Self {
+        // Open latest fragment for read or create a new fragment
+        // if non exist
+        let file = if fragment_readers.is_empty() {
+            let file = new_fragment(fragment, &dir)?;
+            fragment_readers.insert(fragment, BufReader::new(file.try_clone()?));
+            file
+        } else {
+            let path = dir.join(format!("{}.{}", fragment, LOG_EXTENSION));
+            OpenOptions::new().write(true).open(path)?
+        };
+        let writer = BufWriter::new(file);
+
+        let mut store = Self {
+            dir,
+            compactable_space,
             fragment,
+            fragment_readers,
             index,
-            reader,
             writer,
-        })
+        };
+        store.compact()?;
+        Ok(store)
+    }
+
+    /// Compacts the Key-Value databases log.
+    ///
+    /// Compaction clears outdated entries from the stores log fragments, generating
+    /// a new log fragment with up to date values.
+    fn compact(&mut self) -> Result<()> {
+        Ok(())
     }
 
     /// Set value for a key. Overrides stored value if any.
@@ -161,18 +243,21 @@ impl KvStore {
         self.writer.flush()?;
 
         self.index.insert(key, (self.fragment, pos..new_pos).into());
-        Ok(())
+        self.compact()
     }
 
     /// Get the value of a key.
     pub fn get(&mut self, key: String) -> Result<Option<String>> {
         match self.index.get(&key) {
             Some(ep) => {
-                self.reader.seek(SeekFrom::Start(ep.pos))?;
+                let reader = self
+                    .fragment_readers
+                    .get_mut(&self.fragment)
+                    .expect("fragment was not located");
+                reader.seek(SeekFrom::Start(ep.pos))?;
 
-                let mut buf = Vec::new();
-                buf.resize(ep.size, 0);
-                self.reader.read(&mut buf[..])?;
+                let mut buf = vec![0; ep.size];
+                reader.read_exact(&mut buf[..])?;
 
                 match serde_json::from_slice(&buf[..]) {
                     Ok(LogEntry::Set { value, .. }) => Ok(Some(value)),
